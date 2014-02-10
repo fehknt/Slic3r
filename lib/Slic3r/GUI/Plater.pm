@@ -562,8 +562,9 @@ sub changescale {
     return if !$object->thumbnail;
     
     # max scale factor should be above 2540 to allow importing files exported in inches
-    my $scale = Wx::GetNumberFromUser("", "Enter the scale % for the selected object:", "Scale", $model_instance->scaling_factor*100, 0, 100000, $self);
-    return if !$scale || $scale == -1;
+    my $scaleText = Wx::GetTextFromUser("Enter the scale % for the selected object:", "Scale", $model_instance->scaling_factor*100, $self);
+    my $scale = 1.0;
+    return if !eval{ $scale = $scale * $scaleText; } || $scale > 254000 || $scale < 0;
     
     $self->{list}->SetItem($obj_idx, 2, "$scale%");
     $scale /= 100;  # turn percent into factor
