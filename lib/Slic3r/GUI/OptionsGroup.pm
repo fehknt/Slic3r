@@ -4,6 +4,7 @@ use Moo;
 use List::Util qw(first);
 use Wx qw(:combobox :font :misc :sizer :systemsettings :textctrl);
 use Wx::Event qw(EVT_CHECKBOX EVT_COMBOBOX EVT_SPINCTRL EVT_TEXT);
+use Encode qw(decode encode);
 
 =head1 NAME
 
@@ -92,8 +93,8 @@ sub _build_lines {
     my $lines = [];
     foreach my $opt (@{$self->options}) {
         push @$lines, {
-            label       => $opt->{label},
-            sidetext    => $opt->{sidetext},
+            label       => decode('UTF-8', $opt->{label}),
+            sidetext    => decode('UTF-8', $opt->{sidetext}),
             full_width  => $opt->{full_width},
             options     => [$opt->{opt_key}],
         };
