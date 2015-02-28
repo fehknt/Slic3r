@@ -2,17 +2,17 @@ use Test::More;
 use strict;
 use warnings;
 
-plan tests => 42;
+plan tests => 43;
 
 BEGIN {
     use FindBin;
     use lib "$FindBin::Bin/../lib";
 }
 
-use List::Util qw(first);
+use List::Util qw(first sum);
 use Slic3r;
-use Slic3r::Geometry qw(scale X Y convex_hull);
-use Slic3r::Geometry::Clipper qw(union diff_ex);
+use Slic3r::Geometry qw(X Y scale unscale convex_hull);
+use Slic3r::Geometry::Clipper qw(union diff_ex offset);
 use Slic3r::Surface qw(:types);
 use Slic3r::Test;
 
@@ -46,12 +46,13 @@ sub scale_points (@) { map [scale $_->[X], scale $_->[Y]], @_ }
     );
     my $flow = Slic3r::Flow->new(
         width           => 0.69,
-        spacing         => 0.69,
+        height          => 0.4,
         nozzle_diameter => 0.50,
     );
+    $filler->spacing($flow->spacing);
     foreach my $angle (0, 45) {
         $surface->expolygon->rotate(Slic3r::Geometry::deg2rad($angle), [0,0]);
-        my ($params, @paths) = $filler->fill_surface($surface, flow => $flow, density => 0.4);
+        my @paths = $filler->fill_surface($surface, layer_height => 0.4, density => 0.4);
         is scalar @paths, 1, 'one continuous path';
     }
 }
@@ -70,17 +71,18 @@ sub scale_points (@) { map [scale $_->[X], scale $_->[Y]], @_ }
         );
         my $flow = Slic3r::Flow->new(
             width           => $flow_spacing,
-            spacing         => $flow_spacing,
+            height          => 0.4,
             nozzle_diameter => $flow_spacing,
         );
-        my ($params, @paths) = $filler->fill_surface(
+        $filler->spacing($flow->spacing);
+        my @paths = $filler->fill_surface(
             $surface,
-            flow            => $flow,
+            layer_height    => $flow->height,
             density         => $density // 1,
         );
         
         # check whether any part was left uncovered
-        my @grown_paths = map @{Slic3r::Polyline->new(@$_)->grow(scale $params->{flow}->spacing/2)}, @paths;
+        my @grown_paths = map @{Slic3r::Polyline->new(@$_)->grow(scale $filler->spacing/2)}, @paths;
         my $uncovered = diff_ex([ @$expolygon ], [ @grown_paths ], 1);
         
         # ignore very small dots
@@ -170,9 +172,10 @@ sub scale_points (@) { map [scale $_->[X], scale $_->[Y]], @_ }
 for my $pattern (qw(rectilinear honeycomb hilbertcurve concentric)) {
     my $config = Slic3r::Config->new_from_defaults;
     $config->set('fill_pattern', $pattern);
+    $config->set('external_fill_pattern', $pattern);
     $config->set('perimeters', 1);
     $config->set('skirts', 0);
-    $config->set('fill_density', 0.2);
+    $config->set('fill_density', 20);
     $config->set('layer_height', 0.05);
     $config->set('perimeter_extruder', 1);
     $config->set('infill_extruder', 2);
@@ -200,8 +203,47 @@ for my $pattern (qw(rectilinear honeycomb hilbertcurve concentric)) {
 {
     my $config = Slic3r::Config->new_from_defaults;
     $config->set('infill_only_where_needed', 1);
-    my $print = Slic3r::Test::init_print('20mm_cube', config => $config);
-    ok my $gcode = Slic3r::Test::gcode($print), "successful G-code generation when infill_only_where_needed is set";
+    $config->set('bottom_solid_layers', 0);
+    $config->set('infill_extruder', 2);
+    $config->set('infill_extrusion_width', 0.5);
+    $config->set('fill_density', 40);
+    $config->set('cooling', 0);                 # for preventing speeds from being altered
+    $config->set('first_layer_speed', '100%');  # for preventing speeds from being altered
+    
+    my $test = sub {
+        my $print = Slic3r::Test::init_print('pyramid', config => $config);
+        
+        my $tool = undef;
+        my @infill_extrusions = ();  # array of polylines
+        Slic3r::GCode::Reader->new->parse(Slic3r::Test::gcode($print), sub {
+            my ($self, $cmd, $args, $info) = @_;
+            
+            if ($cmd =~ /^T(\d+)/) {
+                $tool = $1;
+            } elsif ($cmd eq 'G1' && $info->{extruding} && $info->{dist_XY} > 0) {
+                if ($tool == $config->infill_extruder-1) {
+                    push @infill_extrusions, Slic3r::Line->new_scale(
+                        [ $self->X, $self->Y ],
+                        [ $info->{new_X}, $info->{new_Y} ],
+                    );
+                }
+            }
+        });
+        return 0 if !@infill_extrusions;  # prevent calling convex_hull() with no points
+        
+        my $convex_hull = convex_hull([ map $_->pp, map @$_, @infill_extrusions ]);
+        return unscale unscale sum(map $_->area, @{offset([$convex_hull], scale(+$config->infill_extrusion_width/2))});
+    };
+    
+    my $tolerance = 5;  # mm^2
+    
+    $config->set('solid_infill_below_area', 0);
+    ok $test->() < $tolerance,
+        'no infill is generated when using infill_only_where_needed on a pyramid';
+    
+    $config->set('solid_infill_below_area', 70);
+    ok abs($test->() - $config->solid_infill_below_area) < $tolerance,
+        'infill is only generated under the forced solid shells';
 }
 
 {
@@ -235,6 +277,8 @@ for my $pattern (qw(rectilinear honeycomb hilbertcurve concentric)) {
     $config->set('nozzle_diameter', [0.35]);
     $config->set('infill_extruder', 2);
     $config->set('infill_extrusion_width', 0.52);
+    $config->set('solid_infill_extrusion_width', 0.52);
+    $config->set('first_layer_extrusion_width', 0);
     
     my $print = Slic3r::Test::init_print('A', config => $config);
     my %infill = ();  # Z => [ Line, Line ... ]
@@ -258,7 +302,7 @@ for my $pattern (qw(rectilinear honeycomb hilbertcurve concentric)) {
     my $grow_d = scale($config->infill_extrusion_width)/2;
     my $layer0_infill = union([ map @{$_->grow($grow_d)}, @{ $infill{0.2} } ]);
     my $layer1_infill = union([ map @{$_->grow($grow_d)}, @{ $infill{0.4} } ]);
-    my $diff = [ grep $_->area >= 2*$grow_d**2, @{diff_ex($layer0_infill, $layer1_infill)} ];
+    my $diff = [ grep { $_->area > 2*(($grow_d*2)**2) } @{diff_ex($layer0_infill, $layer1_infill)} ];
     is scalar(@$diff), 0, 'no missing parts in solid shell when fill_density is 0';
 }
 

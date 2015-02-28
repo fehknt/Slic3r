@@ -13,32 +13,43 @@ my %prereqs = qw(
     File::Basename                  0
     File::Spec                      0
     Getopt::Long                    0
-    Math::Geometry::Voronoi         1.3
     Math::PlanePath                 53
     Module::Build::WithXSpp         0.14
     Moo                             1.003001
+    POSIX                           0
     Scalar::Util                    0
-    Test::Harness                   0
     Test::More                      0
+    Thread::Semaphore               0
     IO::Scalar                      0
+    threads                         1.96
     Time::HiRes                     0
 );
 my %recommends = qw(
     Class::XSAccessor               0
     XML::SAX::ExpatXS               0
+    Test::Harness                   0
 );
 
+my $sudo    = grep { $_ eq '--sudo' } @ARGV;
 my $gui     = grep { $_ eq '--gui' } @ARGV;
 my $xs_only = grep { $_ eq '--xs' }  @ARGV;
 if ($gui) {
     %prereqs = qw(
+    Class::Accessor                 0
     Wx                              0.9918
+    Socket                          2.016
     );
     %recommends = qw(
     Growl::GNTP                     0.15
     Wx::GLCanvas                    0
     OpenGL                          0
+    LWP::UserAgent                  0
+    Net::Bonjour                    0
     );
+    if ($^O eq 'MSWin32') {
+        # we need an up-to-date Win32::API because older aren't thread-safe (GH #2517)
+        $prereqs{'Win32::API'} = 0.79;
+    }
 } elsif ($xs_only) {
     %prereqs = %recommends = ();
 }
@@ -90,19 +101,23 @@ If it is installed in a non-standard location you can do:
 
 EOF
         if !$cpanm;
-    
+    my @cpanm_args = ();
+    push @cpanm_args, "--sudo" if $sudo;
+
     # make sure our cpanm is updated (old ones don't support the ~ syntax)
-    system $cpanm, 'App::cpanminus';
+    system $cpanm, @cpanm_args, 'App::cpanminus';
     
     # install the Windows-compatible Math::Libm
     if ($^O eq 'MSWin32' && !eval "use Math::Libm; 1") {
-        system $cpanm, 'https://github.com/alexrj/Math-Libm/tarball/master';
+        system $cpanm, @cpanm_args, 'https://github.com/alexrj/Math-Libm/tarball/master';
     }
     
     my %modules = (%prereqs, %recommends);
     foreach my $module (sort keys %modules) {
         my $version = $modules{$module};
-        my @cmd = ($cpanm, "$module~$version");
+        my @cmd = ($cpanm, @cpanm_args);
+        push @cmd, '--notest', if $module eq 'OpenGL';  # temporary workaround for upstream bug in test
+        push @cmd, "$module~$version";
         if ($module eq 'XML::SAX::ExpatXS' && $^O eq 'MSWin32') {
             my $mingw = 'C:\dev\CitrusPerl\mingw64';
             $mingw = 'C:\dev\CitrusPerl\mingw32' if !-d $mingw;
@@ -132,7 +147,7 @@ EOF
                 system './xs/Build', 'distclean';
             }
         }
-        my $res = system $cpanm, '--reinstall', './xs';
+        my $res = system $cpanm, @cpanm_args, '--reinstall', '--verbose', './xs';
         if ($res != 0) {
             die "The XS/C++ code failed to compile, aborting\n";
         }

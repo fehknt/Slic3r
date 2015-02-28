@@ -2,14 +2,15 @@
 
 %{
 #include <myinit.h>
-#include "ClipperUtils.hpp"
-#include "Polyline.hpp"
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/Polyline.hpp"
 %}
 
 %name{Slic3r::Polyline} class Polyline {
     ~Polyline();
-    Polyline* clone()
-        %code{% const char* CLASS = "Slic3r::Polyline"; RETVAL = new Polyline(*THIS); %};
+    Clone<Polyline> clone()
+        %code{% RETVAL = THIS; %};
     SV* arrayref()
         %code{% RETVAL = THIS->to_AV(); %};
     SV* pp()
@@ -20,16 +21,24 @@
         %code{% THIS->points.pop_back(); %};
     void reverse();
     Lines lines();
-    Point* first_point()
-        %code{% const char* CLASS = "Slic3r::Point"; RETVAL = THIS->first_point(); %};
-    Point* last_point()
-        %code{% const char* CLASS = "Slic3r::Point"; RETVAL = THIS->last_point(); %};
+    Clone<Point> first_point();
+    Clone<Point> last_point();
     Points equally_spaced_points(double distance);
     double length();
     bool is_valid();
     void clip_end(double distance);
     void clip_start(double distance);
+    void extend_end(double distance);
+    void extend_start(double distance);
     void simplify(double tolerance);
+    void simplify_by_visibility(ExPolygon* expolygon)
+        %code{% THIS->simplify_by_visibility(*expolygon); %};
+    void split_at(Point* point, Polyline* p1, Polyline* p2)
+        %code{% THIS->split_at(*point, p1, p2); %};
+    bool is_straight();
+    Clone<BoundingBox> bounding_box();
+    void remove_duplicate_points();
+    std::string wkt();
 %{
 
 Polyline*
@@ -68,7 +77,7 @@ Polyline::rotate(angle, center_sv)
     CODE:
         Point center;
         center.from_SV_check(center_sv);
-        THIS->rotate(angle, &center);
+        THIS->rotate(angle, center);
 
 Polygons
 Polyline::grow(delta, scale = CLIPPER_OFFSET_SCALE, joinType = ClipperLib::jtSquare, miterLimit = 3)
@@ -77,9 +86,7 @@ Polyline::grow(delta, scale = CLIPPER_OFFSET_SCALE, joinType = ClipperLib::jtSqu
     ClipperLib::JoinType    joinType
     double                  miterLimit
     CODE:
-        Polylines polylines;
-        polylines.push_back(*THIS);
-        offset(polylines, RETVAL, delta, scale, joinType, miterLimit);
+        offset(*THIS, &RETVAL, delta, scale, joinType, miterLimit);
     OUTPUT:
         RETVAL
 

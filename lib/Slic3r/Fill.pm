@@ -2,18 +2,14 @@ package Slic3r::Fill;
 use Moo;
 
 use Slic3r::ExtrusionPath ':roles';
-use Slic3r::Fill::ArchimedeanChords;
+use Slic3r::Fill::3DHoneycomb;
 use Slic3r::Fill::Base;
 use Slic3r::Fill::Concentric;
-use Slic3r::Fill::Flowsnake;
-use Slic3r::Fill::HilbertCurve;
 use Slic3r::Fill::Honeycomb;
-use Slic3r::Fill::Line;
-use Slic3r::Fill::OctagramSpiral;
 use Slic3r::Fill::PlanePath;
 use Slic3r::Fill::Rectilinear;
 use Slic3r::Flow ':roles';
-use Slic3r::Geometry qw(X Y PI scale chained_path);
+use Slic3r::Geometry qw(X Y PI scale chained_path deg2rad);
 use Slic3r::Geometry::Clipper qw(union union_ex diff diff_ex intersection_ex offset offset2);
 use Slic3r::Surface ':types';
 
@@ -30,6 +26,7 @@ our %FillTypes = (
     line                => 'Slic3r::Fill::Line',
     concentric          => 'Slic3r::Fill::Concentric',
     honeycomb           => 'Slic3r::Fill::Honeycomb',
+    '3dhoneycomb'       => 'Slic3r::Fill::3DHoneycomb',
 );
 
 sub filler {
@@ -62,7 +59,7 @@ sub make_fill {
     # in case of bridge surfaces, the ones with defined angle will be attached to the ones
     # without any angle (shouldn't this logic be moved to process_external_surfaces()?)
     {
-        my @surfaces_with_bridge_angle = grep defined $_->bridge_angle, @{$layerm->fill_surfaces};
+        my @surfaces_with_bridge_angle = grep { $_->bridge_angle >= 0 } @{$layerm->fill_surfaces};
         
         # group surfaces by distinct properties
         my @groups = @{$layerm->fill_surfaces->group};
@@ -81,7 +78,7 @@ sub make_fill {
                         ? $layerm->flow(FLOW_ROLE_TOP_SOLID_INFILL)->width
                         : $solid_infill_flow->width;
                     $pattern[$i] = $groups[$i][0]->is_external
-                        ? $layerm->config->solid_fill_pattern
+                        ? $layerm->config->external_fill_pattern
                         : 'rectilinear';
                 } else {
                     $is_solid[$i]   = 0;
@@ -111,13 +108,13 @@ sub make_fill {
         }
         
         # give priority to bridges
-        @groups = sort { defined $a->[0]->bridge_angle ? -1 : 0 } @groups;
+        @groups = sort { ($a->[0]->bridge_angle >= 0) ? -1 : 0 } @groups;
         
         foreach my $group (@groups) {
             my $union_p = union([ map $_->p, @$group ], 1);
             
             # subtract surfaces having a defined bridge_angle from any other
-            if (@surfaces_with_bridge_angle && !defined $group->[0]->bridge_angle) {
+            if (@surfaces_with_bridge_angle && $group->[0]->bridge_angle < 0) {
                 $union_p = diff(
                     $union_p,
                     [ map $_->p, @surfaces_with_bridge_angle ],
@@ -145,7 +142,7 @@ sub make_fill {
     # we are going to grow such regions by overlapping them with the void (if any)
     # TODO: detect and investigate whether there could be narrow regions without
     # any void neighbors
-    my $distance_between_surfaces = $infill_flow->scaled_spacing * &Slic3r::INFILL_OVERLAP_OVER_SPACING;
+    my $distance_between_surfaces = $infill_flow->scaled_spacing;
     {
         my $collapsed = diff(
             [ map @{$_->expolygon}, @surfaces ],
@@ -177,75 +174,112 @@ sub make_fill {
     }
     
     my @fills = ();
-    my @fills_ordering_points =  ();
     SURFACE: foreach my $surface (@surfaces) {
         next if $surface->surface_type == S_TYPE_INTERNALVOID;
         my $filler          = $layerm->config->fill_pattern;
         my $density         = $fill_density;
-        my $flow            = ($surface->surface_type == S_TYPE_TOP)
-            ? $layerm->flow(FLOW_ROLE_TOP_SOLID_INFILL)
-            : $surface->is_solid
-                ? $solid_infill_flow
-                : $infill_flow;
+        my $role = ($surface->surface_type == S_TYPE_TOP) ? FLOW_ROLE_TOP_SOLID_INFILL
+            : $surface->is_solid ? FLOW_ROLE_SOLID_INFILL
+            : FLOW_ROLE_INFILL;
         my $is_bridge       = $layerm->id > 0 && $surface->is_bridge;
         my $is_solid        = $surface->is_solid;
         
-        # force 100% density and rectilinear fill for external surfaces
-        if ($surface->surface_type != S_TYPE_INTERNAL) {
-            $density = 1;
-            $filler = $layerm->config->solid_fill_pattern;
-            if ($is_bridge) {
-                $filler = 'rectilinear';
-                $flow = $layerm->flow(FLOW_ROLE_SOLID_INFILL, 1);
-            } elsif ($surface->surface_type == S_TYPE_INTERNALSOLID) {
-                $filler = 'rectilinear';
+        if ($surface->is_solid) {
+            $density = 100;
+            $filler = 'rectilinear';
+            if ($surface->is_external && !$is_bridge) {
+                $filler = $layerm->config->external_fill_pattern;
             }
         } else {
             next SURFACE unless $density > 0;
         }
         
+        # get filler object
         my $f = $self->filler($filler);
+        
+        # calculate the actual flow we'll be using for this infill
+        my $h = $surface->thickness == -1 ? $layerm->height : $surface->thickness;
+        my $flow = $layerm->region->flow(
+            $role,
+            $h,
+            $is_bridge || $f->use_bridge_flow,
+            $layerm->id == 0,
+            -1,
+            $layerm->object,
+        );
+        
+        # calculate flow spacing for infill pattern generation
+        my $using_internal_flow = 0;
+        if (!$is_solid && !$is_bridge) {
+            # it's internal infill, so we can calculate a generic flow spacing 
+            # for all layers, for avoiding the ugly effect of
+            # misaligned infill on first layer because of different extrusion width and
+            # layer height
+            my $internal_flow = $layerm->region->flow(
+                FLOW_ROLE_INFILL,
+                $layerm->object->config->layer_height,  # TODO: handle infill_every_layers?
+                0,  # no bridge
+                0,  # no first layer
+                -1, # auto width
+                $layerm->object,
+            );
+            $f->spacing($internal_flow->spacing);
+            $using_internal_flow = 1;
+        } else {
+            $f->spacing($flow->spacing);
+        }
+        
         $f->layer_id($layerm->id);
-        $f->angle($layerm->config->fill_angle);
-        my ($params, @polylines) = $f->fill_surface(
+        $f->z($layerm->print_z);
+        $f->angle(deg2rad($layerm->config->fill_angle));
+        $f->loop_clipping(scale($flow->nozzle_diameter) * &Slic3r::LOOP_CLIPPING_LENGTH_OVER_NOZZLE_DIAMETER);
+        my @polylines = $f->fill_surface(
             $surface,
-            density => $density,
-            flow    => $flow,
+            density         => $density/100,
+            layer_height    => $h,
         );
         next unless @polylines;
         
-        my $h = $surface->thickness;
-        $h = $layerm->height if $h == -1;
-        my $mm3_per_mm = $params->{flow}->mm3_per_mm($h);
+        # calculate actual flow from spacing (which might have been adjusted by the infill
+        # pattern generator)
+        if ($using_internal_flow) {
+            # if we used the internal flow we're not doing a solid infill
+            # so we can safely ignore the slight variation that might have
+            # been applied to $f->flow_spacing
+        } else {
+            $flow = Slic3r::Flow->new_from_spacing(
+                spacing         => $f->spacing,
+                nozzle_diameter => $flow->nozzle_diameter,
+                layer_height    => $h,
+                bridge          => $is_bridge || $f->use_bridge_flow,
+            );
+        }
+        my $mm3_per_mm = $flow->mm3_per_mm;
         
         # save into layer
-        push @fills, my $collection = Slic3r::ExtrusionPath::Collection->new;
-        $collection->no_sort($params->{no_sort});
-        
-        $collection->append(
-            map Slic3r::ExtrusionPath->new(
-                polyline => $_,
-                role => ($surface->surface_type == S_TYPE_INTERNALBRIDGE
-                    ? EXTR_ROLE_INTERNALBRIDGE
-                    : $is_bridge
-                        ? EXTR_ROLE_BRIDGE
-                        : $is_solid
-                            ? (($surface->surface_type == S_TYPE_TOP) ? EXTR_ROLE_TOPSOLIDFILL : EXTR_ROLE_SOLIDFILL)
-                            : EXTR_ROLE_FILL),
-                mm3_per_mm => $mm3_per_mm,
-            ), @polylines,
-        );
-        push @fills_ordering_points, $polylines[0]->first_point;
+        {
+            my $role = $is_bridge ? EXTR_ROLE_BRIDGE
+                : $is_solid ? (($surface->surface_type == S_TYPE_TOP) ? EXTR_ROLE_TOPSOLIDFILL : EXTR_ROLE_SOLIDFILL)
+                : EXTR_ROLE_FILL;
+            
+            push @fills, my $collection = Slic3r::ExtrusionPath::Collection->new;
+            $collection->no_sort($f->no_sort);
+            $collection->append(
+                map Slic3r::ExtrusionPath->new(
+                    polyline    => $_,
+                    role        => $role,
+                    mm3_per_mm  => $mm3_per_mm,
+                    width       => $flow->width,
+                    height      => $flow->height,
+                ), @polylines,
+            );
+        }
     }
     
     # add thin fill regions
-    if ($layerm->thin_fills->count > 0) {
-        push @fills, Slic3r::ExtrusionPath::Collection->new(@{$layerm->thin_fills});
-        push @fills_ordering_points, $fills[-1]->first_point;
+    foreach my $thin_fill (@{$layerm->thin_fills}) {
+        push @fills, Slic3r::ExtrusionPath::Collection->new($thin_fill);
     }
-    
-    # organize infill paths using a nearest-neighbor search
-    @fills = @fills[ @{chained_path(\@fills_ordering_points)} ];
     
     return @fills;
 }

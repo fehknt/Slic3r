@@ -5,7 +5,7 @@ use warnings;
 require Exporter;
 our @ISA = qw(Exporter);
 our @EXPORT_OK = qw(
-    PI X Y Z A B X1 Y1 X2 Y2 Z1 Z2 MIN MAX epsilon slope line_atan lines_parallel 
+    PI X Y Z A B X1 Y1 X2 Y2 Z1 Z2 MIN MAX epsilon slope 
     line_point_belongs_to_segment points_coincide distance_between_points 
     normalize tan move_points_3D
     point_in_polygon point_in_segment segment_in_segment
@@ -13,14 +13,14 @@ our @EXPORT_OK = qw(
     point_along_segment polygon_segment_having_point polygon_has_subsegment
     deg2rad rad2deg
     rotate_points move_points
-    dot perp polygon_points_visibility
+    dot perp
     line_intersection bounding_box bounding_box_intersect
-    angle3points three_points_aligned line_direction
+    angle3points
     chained_path chained_path_from collinear scale unscale
     rad2deg_dir bounding_box_center line_intersects_any douglas_peucker
     polyline_remove_short_segments normal triangle_normal polygon_is_convex
     scaled_epsilon bounding_box_3D size_3D size_2D
-    convex_hull
+    convex_hull directions_parallel directions_parallel_within
 );
 
 
@@ -55,30 +55,6 @@ sub slope {
     my ($line) = @_;
     return undef if abs($line->[B][X] - $line->[A][X]) < epsilon;  # line is vertical
     return ($line->[B][Y] - $line->[A][Y]) / ($line->[B][X] - $line->[A][X]);
-}
-
-sub line_atan {
-    my ($line) = @_;
-    return atan2($line->[B][Y] - $line->[A][Y], $line->[B][X] - $line->[A][X]);
-}
-
-sub line_direction {
-    my ($line) = @_;
-    my $atan2 = line_atan($line);
-    return ($atan2 == PI) ? 0
-        : ($atan2 < 0) ? ($atan2 + PI)
-        : $atan2;
-}
-
-sub lines_parallel {
-    my ($line1, $line2) = @_;
-    
-    return abs(line_direction($line1) - line_direction($line2)) < $parallel_degrees_limit;
-}
-
-sub three_points_aligned {
-    my ($p1, $p2, $p3) = @_;
-    return lines_parallel([$p1, $p2], [$p2, $p3]);
 }
 
 # this subroutine checks whether a given point may belong to a given
@@ -231,23 +207,6 @@ sub polygon_is_convex {
     return 1;
 }
 
-sub deg2rad {
-    my ($degrees) = @_;
-    return PI() * $degrees / 180;
-}
-
-sub rad2deg {
-    my ($rad) = @_;
-    return $rad / PI() * 180;
-}
-
-sub rad2deg_dir {
-    my ($rad) = @_;
-    $rad = ($rad < PI) ? (-$rad + PI/2) : ($rad + PI/2);
-    $rad += PI if $rad < 0;
-    return rad2deg($rad);
-}
-
 sub rotate_points {
     my ($radians, $center, @points) = @_;
     $center //= [0,0];
@@ -313,19 +272,6 @@ sub dot {
 sub perp {
     my ($u, $v) = @_;
     return $u->[X] * $v->[Y] - $u->[Y] * $v->[X];
-}
-
-sub polygon_points_visibility {
-    my ($polygon, $p1, $p2) = @_;
-    
-    my $our_line = [ $p1, $p2 ];
-    foreach my $line (polygon_lines($polygon)) {
-        my $intersection = line_intersection($our_line, $line, 1) // next;
-        next if grep points_coincide($intersection, $_), $p1, $p2;
-        return 0;
-    }
-    
-    return 1;
 }
 
 sub line_intersects_any {
